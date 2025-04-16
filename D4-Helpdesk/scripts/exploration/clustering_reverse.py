@@ -35,7 +35,7 @@ load_dotenv(dotenv_path=Path(__file__).resolve().parents[2] / ".env")
 HELPDESK_DIR = Path(__file__).resolve().parents[2]
 EMBEDDINGS_DIR = HELPDESK_DIR / "helpdesk-data" / "helpdesk-embeddings"
 DB_PATH = EMBEDDINGS_DIR / "chroma_summaries"
-#COLLECTION_NAME = "helpdesk_complete_summaries_embeddings"
+# COLLECTION_NAME = "helpdesk_complete_summaries_embeddings"
 COLLECTION_NAME = "helpdesk_summaries_embeddings"
 
 # --- UMAP Configuration ---
@@ -319,22 +319,46 @@ def visualize_embeddings_plotly(
                 axis=1,
             )
 
-    if color_by_key == "cluster_label":
-        if plot_df[color_by_key].isnull().any():
-            plot_df[color_by_key] = plot_df[color_by_key].fillna(-1)
-        plot_df[color_by_key] = plot_df[color_by_key].astype(int).astype(str)
-        plot_df[color_by_key] = plot_df[color_by_key].replace("-1", "Noise")
-    elif plot_df[color_by_key].isnull().any():
-        plot_df[color_by_key] = plot_df[color_by_key].astype(str).fillna("Unknown")
-
-    hover_cols = [
-        col for col in metadata_df.columns if col not in ["doc_id", "document_text"]
+    # Define columns to exclude from hover data
+    exclude_cols = [
+        "Description",
+        "Solution",
+        "Summary Solution",
+        "Summary in English",
+        "document_text",
     ]
+    
+    # Get hover columns and truncate their content
+    hover_cols = [
+        col
+        for col in metadata_df.columns
+        if col not in exclude_cols
+    ]
+    
+    # Create a copy of the plot dataframe to modify hover text
+    plot_df = plot_df.copy()
+    
+    # Truncate all hover column values to 100 characters
+    for col in hover_cols:
+        if plot_df[col].dtype == 'object':  # Only process string columns
+            plot_df[col] = plot_df[col].astype(str).apply(
+                lambda x: x[:97] + "..." if len(x) > 100 else x
+            )
+    
+    # Add document_text as hover_text if available
     if "document_text" in metadata_df.columns:
-        plot_df["hover_text"] = plot_df["document_text"].str[:100] + "..."
+        plot_df["hover_text"] = metadata_df["document_text"].astype(str).apply(
+            lambda x: x[:97] + "..." if len(x) > 100 else x
+        )
         hover_cols.insert(0, "hover_text")
+    
+    # Add color_by_key to hover data if not already included
     if color_by_key not in hover_cols and color_by_key in plot_df.columns:
         hover_cols.append(color_by_key)
+        if plot_df[color_by_key].dtype == 'object':
+            plot_df[color_by_key] = plot_df[color_by_key].astype(str).apply(
+                lambda x: x[:97] + "..." if len(x) > 100 else x
+            )
 
     color_map = {"Noise": "grey"} if "Noise" in plot_df[color_by_key].unique() else None
 

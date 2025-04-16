@@ -1,7 +1,7 @@
 import os
 import pandas as pd
 from pathlib import Path
-from utils import clean_custom_fields, filter_summary_content, clean_description_content
+from utils_cleaning import clean_custom_fields, filter_summary_content, clean_description_content
 
 def load_dataset(file_path: str | Path, load_columns: list[str]) -> pd.DataFrame:
     """

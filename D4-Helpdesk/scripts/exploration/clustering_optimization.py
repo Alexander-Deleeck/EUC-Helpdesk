@@ -13,6 +13,19 @@ import random
 from functools import partial
 import time  # For timing searches
 
+# --- Local Utility Import ---
+# Ensure utils.py is accessible (e.g., in the same directory or added to PYTHONPATH)
+try:
+    from utils_clustering import save_hyperopt_results 
+except ImportError:
+    print("Error: Could not import 'save_hyperopt_results' from utils.py.")
+    print("Ensure utils.py is in the correct path.")
+
+    # Define a dummy function to avoid NameError later if import fails
+    def save_hyperopt_results(*args, **kwargs):
+        print("Warning: save_hyperopt_results function is unavailable.")
+
+
 # --- Clustering ---
 try:
     import hdbscan
@@ -75,7 +88,7 @@ DB_PATH = EMBEDDINGS_DIR / "chroma_summaries"
 HYPEROPT_DIR = EMBEDDINGS_DIR / "hyperopt"
 
 COLLECTION_NAME = "helpdesk_summaries_embeddings"
-RANDOM_STATE = 42  # Consistent random state for UMAP/searches
+RANDOM_STATE = None #42  # Consistent random state for UMAP/searches
 
 # --- Default UMAP/HDBSCAN Parameters (if tuning is skipped) ---
 DEFAULT_N_COMPONENTS = 3  # 3 for 3D, 2 for 2D visualization
@@ -86,7 +99,7 @@ DEFAULT_HDBSCAN_MIN_CLUSTER_SIZE = 10  # Default if skipping tuning
 # --- Hyperparameter Tuning Configuration ---
 # Choose 'bayesian', 'random', or 'none'
 TUNING_METHOD = "bayesian"  # Or 'random' or 'none'
-NUM_EVALS = 50  # Number of iterations for random/bayesian search (adjust based on time)
+NUM_EVALS = 30  # Number of iterations for random/bayesian search (adjust based on time)
 PROB_THRESHOLD = (
     0.05  # Minimum probability for a point to be considered 'well clustered'
 )
@@ -135,8 +148,6 @@ def load_data_from_chroma(db_path: Path, collection_name: str):
         collection = client.get_collection(name=collection_name)
         collection_count = collection.count()
         print(f"Collection '{collection_name}' found with {collection_count} items.")
-        if collection_count == 0:
-            raise ValueError(f"Collection '{collection_name}' is empty.")
     except Exception as e:
         print(f"Error getting collection '{collection_name}': {e}")
         try:
@@ -145,80 +156,208 @@ def load_data_from_chroma(db_path: Path, collection_name: str):
             print(f"Could not list collections: {list_e}")
         raise
 
+    if collection_count == 0:
+        print("Warning: Collection count is 0. Attempting to get data anyway...")
+        # Allow proceeding but expect potential errors or empty results
+
     print("Retrieving all embeddings and metadata (this might take a moment)...")
     try:
+        # Retrieve all data points. include embeddings and metadatas
+        # As per your comment, Chroma implicitly returns 'ids'.
+        # We explicitly ask for embeddings and metadatas.
         results = collection.get(
-            include=["embeddings", "metadatas", "documents", "ids"]
+            include=[
+                "embeddings",
+                "metadatas",
+                "documents",
+            ]  # Also get documents for hover info potentially
         )
     except Exception as e:
-        print(f"\n--- Error during collection.get() --- Error: {e}")
+        print(f"\n--- Error during collection.get() ---")
+        print(f"Error: {e}")
         traceback.print_exc()
-        print("---")
+        print("---------------------------------------\n")
         raise
 
+    print("--- Debugging post-collection.get() ---")
+    print(f"Type of results: {type(results)}")
+    print(f"Keys in results: {results.keys()}")
+
+    # Check existence and type of expected keys
+    for key in ["ids", "embeddings", "metadatas", "documents"]:
+        if key in results:
+            print(f"Key '{key}': Found, Type: {type(results[key])}")
+            if isinstance(results[key], list):
+                print(f"  Length of results['{key}']: {len(results[key])}")
+                if len(results[key]) > 0:
+                    print(f"  Type of first element: {type(results[key][0])}")
+                    if key == "embeddings" and isinstance(
+                        results[key][0], (list, np.ndarray)
+                    ):
+                        try:
+                            print(
+                                f"    Length/Shape of first embedding: {len(results[key][0])}"
+                            )
+                        except TypeError:
+                            print(
+                                f"    First embedding is not list/array like: {results[key][0]}"
+                            )
+
+            elif isinstance(results[key], np.ndarray):
+                print(f"  Shape of results['{key}']: {results[key].shape}")
+            else:
+                print(f"  Value: {results[key]}")  # Print if not list/array
+        else:
+            print(f"Key '{key}': Not found in results!")
+    print("--- End Debugging post-collection.get() ---")
+
+    # **Revised Check:** Use len() for checking if lists are empty
+    # Use .get() with default empty list [] to avoid KeyError if a key is missing
     ids = results.get("ids", [])
     embeddings_list = results.get("embeddings", [])
     metadatas_list = results.get("metadatas", [])
-    documents_list = results.get("documents", [])
+    documents_list = results.get("documents", [])  # Added documents retrieval
 
-    if not ids or not embeddings_list or not metadatas_list:
+    print(f"Retrieved {len(ids)} IDs.")  # Use the length of the retrieved ids list
+
+    if not results or len(embeddings_list) == 0 or len(metadatas_list) == 0:
+        print("\n--- ERROR DETECTED: Empty Results ---")
+        print(f"Results dict empty: {not results}")
+        print(f"Embeddings list empty: {len(embeddings_list) == 0}")
+        print(f"Metadatas list empty: {len(metadatas_list) == 0}")
+        print("--------------------------------------\n")
         raise ValueError(
-            "No data (IDs, embeddings, or metadata) retrieved from ChromaDB."
+            "No data (embeddings or metadata) retrieved from ChromaDB. Ensure the collection is populated correctly."
         )
+    print("DEBUG: Passed check for empty results.")
 
-    # Basic length check
-    lengths = [len(ids), len(embeddings_list), len(metadatas_list), len(documents_list)]
-    if len(set(lengths)) > 1:
-        min_len = min(lengths)
+    # Check for length mismatch (should not happen with collection.get())
+    if not (
+        len(ids) == len(embeddings_list) == len(metadatas_list) == len(documents_list)
+    ):
+        print("\n--- WARNING: Length Mismatch ---")
         print(
-            f"Warning: Length mismatch: IDs={len(ids)}, Embeddings={len(embeddings_list)}, Metadata={len(metadatas_list)}, Docs={len(documents_list)}. Truncating to {min_len}."
+            f"Length mismatch between retrieved components: "
+            f"IDs={len(ids)}, Embeddings={len(embeddings_list)}, "
+            f"Metadata={len(metadatas_list)}, Documents={len(documents_list)}"
+        )
+        print("Attempting to proceed, but this might indicate an issue.")
+        # Optional: Add logic here to truncate to the minimum length or raise error
+        min_len = min(
+            len(ids), len(embeddings_list), len(metadatas_list), len(documents_list)
         )
         ids = ids[:min_len]
         embeddings_list = embeddings_list[:min_len]
         metadatas_list = metadatas_list[:min_len]
         documents_list = documents_list[:min_len]
+        print(f"Truncated lists to minimum length: {min_len}")
+        print("----------------------------------\n")
 
     # Convert embeddings to a NumPy array
     try:
-        embeddings = np.array(embeddings_list, dtype=np.float32)  # UMAP prefers float32
-        print(f"Embeddings shape: {embeddings.shape}")
-        if np.isnan(embeddings).any() or np.isinf(embeddings).any():
-            print("Warning: Embeddings contain NaNs or Infs. This may cause issues.")
+        print("DEBUG: Attempting np.array(embeddings_list)...")
+        embeddings = np.array(embeddings_list)
+        print(
+            f"DEBUG: Successfully created embeddings array with shape: {embeddings.shape}"
+        )
     except Exception as e:
-        print(f"\n--- Error converting embeddings to NumPy array --- Error: {e}")
+        print("\n--- Error converting embeddings to NumPy array ---")
+        print(f"Error: {e}")
+        print(f"Type of embeddings_list: {type(embeddings_list)}")
+        if isinstance(embeddings_list, list) and len(embeddings_list) > 0:
+            print(f"Type of first element: {type(embeddings_list[0])}")
+            # Check if embeddings have consistent dimensions
+            try:
+                first_len = len(embeddings_list[0])
+                is_consistent = all(len(emb) == first_len for emb in embeddings_list)
+                print(f"Embeddings lengths consistent: {is_consistent}")
+                if not is_consistent:
+                    inconsistent_indices = [
+                        i
+                        for i, emb in enumerate(embeddings_list)
+                        if len(emb) != first_len
+                    ]
+                    print(
+                        f"Indices with inconsistent lengths: {inconsistent_indices[:10]}..."
+                    )  # Show first few
+            except Exception as len_e:
+                print(f"Could not check embedding lengths: {len_e}")
         traceback.print_exc()
-        print("---")
+        print("----------------------------------------------------\n")
         raise
 
     # Convert metadata list of dicts to a Pandas DataFrame
     try:
+        print("DEBUG: Attempting pd.DataFrame(metadatas_list)...")
         metadata_df = pd.DataFrame(metadatas_list)
+        print(
+            f"DEBUG: Successfully created metadata DataFrame with shape: {metadata_df.shape}"
+        )
+        # Add IDs and potentially documents to the DataFrame
         metadata_df["doc_id"] = ids
-        metadata_df["document_text"] = documents_list
-        print(f"Metadata DataFrame shape: {metadata_df.shape}")
+        metadata_df["document_text"] = (
+            documents_list  # Add original text if needed for hover
+        )
+        print("DEBUG: Added 'doc_id' and 'document_text' columns to DataFrame.")
     except Exception as e:
-        print(f"\n--- Error creating Pandas DataFrame from metadata --- Error: {e}")
+        print("\n--- Error creating Pandas DataFrame from metadata ---")
+        print(f"Error: {e}")
+        print(f"Type of metadatas_list: {type(metadatas_list)}")
+        if isinstance(metadatas_list, list) and len(metadatas_list) > 0:
+            print(f"Type of first element: {type(metadatas_list[0])}")
+            if isinstance(metadatas_list[0], dict):
+                print(f"Keys in first metadata dict: {list(metadatas_list[0].keys())}")
+            else:
+                print(f"First metadata element is not a dict: {metadatas_list[0]}")
         traceback.print_exc()
-        print("---")
+        print("-------------------------------------------------------\n")
         raise
 
     print("Data loaded successfully.")
+    print("Metadata DataFrame info:")
     metadata_df.info()
 
-    # Identify potential metadata keys for coloring (optional, keep for flexibility)
     potential_color_keys = []
     print("\nIdentifying potential metadata keys for coloring...")
     for col in metadata_df.columns:
-        # Simplified heuristic
-        if col not in ["doc_id", "document_text"] and metadata_df[col].nunique() < 100:
-            try:
-                if metadata_df[col].nunique() > 0:
-                    potential_color_keys.append(col)
+        try:
+            # Exclude obviously unsuitable columns first
+            if col in [
+                "doc_id",
+                "document_text",
+                "Description",
+                "Summary",
+                "Summary Solution",
+                "Summary in English",
+            ]:
+                continue  # Skip text fields and ID
+
+            col_dtype_kind = metadata_df[
+                col
+            ].dtype.kind  #'O' (object), 'b' (bool), 'i' (int), 'f' (float), 'M' (datetime) etc.
+            unique_count = metadata_df[col].nunique()
+
+            # Heuristic: Categorical (object/string, boolean) or low-cardinality numerical/datetime
+            if col_dtype_kind in ["O", "b"] or (
+                col_dtype_kind in ["i", "f", "M"] and unique_count < 50
+            ):
+                if unique_count > 0:  # Ensure there's at least one value
                     print(
-                        f"  - Found potential key: '{col}' (Unique: {metadata_df[col].nunique()})"
+                        f"  - Considering '{col}' (Type: {metadata_df[col].dtype}, Unique: {unique_count})"
                     )
-            except Exception:  # Handle potential errors with nunique on weird data
-                pass
+                    potential_color_keys.append(col)
+                else:
+                    print(
+                        f"  - Skipping '{col}' (Type: {metadata_df[col].dtype}, Unique: 0 - No values)"
+                    )
+            # else: # Optional: Print why a column was skipped
+            #    print(f"  - Skipping '{col}' (Type: {metadata_df[col].dtype}, Unique: {unique_count} - High cardinality or unsuitable type)")
+
+        except Exception as e:
+            print(
+                f"  - Error processing column '{col}': {e}"
+            )  # Catch errors during nunique() etc.
+
     print("\nPotential metadata keys for coloring:", potential_color_keys)
 
     return embeddings, metadata_df, potential_color_keys
@@ -636,13 +775,14 @@ def visualize_embeddings_plotly(
 
 # --- Main Execution ---
 if __name__ == "__main__":
+    # --- Setup ---
     if not UMAP_AVAILABLE:
-        print("UMAP is required to run this script. Please install umap-learn.")
-        exit()
+        exit("UMAP is required.")
+    # Allow running without HDBSCAN, but tuning/clustering won't work fully
     if not HDBSCAN_AVAILABLE:
-        print("HDBSCAN is required for clustering. Please install hdbscan.")
-        # Decide if you want to proceed without clustering
-        # exit() # Or allow proceeding, but tuning/clustering sections will be skipped
+        print(
+            "Warning: HDBSCAN not found. Tuning and clustering steps will be skipped."
+        )
 
     try:
         # 1. Load Data
@@ -650,77 +790,50 @@ if __name__ == "__main__":
             DB_PATH, COLLECTION_NAME
         )
 
-        # --- 2. Hyperparameter Tuning (Optional) ---
+        # --- 2. Hyperparameter Tuning ---
         best_params = None
-        tuning_results = None  # To store results from random/bayesian search
+        tuning_results = None  # Store results (DataFrame or Trials)
 
-        if TUNING_METHOD == "none" or not HDBSCAN_AVAILABLE:
+        # Determine if tuning can/should run
+        can_tune = HDBSCAN_AVAILABLE and (TUNING_METHOD in ["random", "bayesian"])
+        if TUNING_METHOD == "bayesian" and not HYPEROPT_AVAILABLE:
+            print(
+                "Hyperopt not found, cannot perform Bayesian optimization. Skipping tuning."
+            )
+            can_tune = False
+        if not can_tune and TUNING_METHOD != "none":
+            print(
+                f"Tuning method '{TUNING_METHOD}' requires libraries that are not available. Skipping tuning."
+            )
+            TUNING_METHOD = "none"  # Force skip if requirements not met
+
+        if TUNING_METHOD == "none":
             print("\n--- Skipping Hyperparameter Tuning ---")
-            print("Using default parameters for UMAP and HDBSCAN.")
             best_params = {
                 "n_neighbors": DEFAULT_UMAP_N_NEIGHBORS,
-                "n_components": DEFAULT_N_COMPONENTS,  # Using default vis components here
+                "n_components": DEFAULT_N_COMPONENTS,  # Use vis components if not tuning
                 "min_cluster_size": DEFAULT_HDBSCAN_MIN_CLUSTER_SIZE,
             }
-
         elif TUNING_METHOD == "random":
-            if not HDBSCAN_AVAILABLE:
-                print("HDBSCAN not found, cannot perform tuning. Skipping.")
-                TUNING_METHOD = "none"  # Force skip
-                best_params = {  # Set defaults again
-                    "n_neighbors": DEFAULT_UMAP_N_NEIGHBORS,
-                    "n_components": DEFAULT_N_COMPONENTS,
-                    "min_cluster_size": DEFAULT_HDBSCAN_MIN_CLUSTER_SIZE,
-                }
-            else:
-                best_params, tuning_results = random_search(
-                    embeddings,
-                    SEARCH_SPACE,
-                    NUM_EVALS,
-                    LABEL_LOWER_BOUND,
-                    LABEL_UPPER_BOUND,
-                )
-                if best_params is None:
-                    print("Random search failed to find suitable parameters. Exiting.")
-                    exit()
-
-        elif TUNING_METHOD == "bayesian":
-            if not HYPEROPT_AVAILABLE:
-                print(
-                    "Hyperopt not found, cannot perform Bayesian optimization. Skipping."
-                )
-                TUNING_METHOD = "none"  # Force skip
-                best_params = {  # Set defaults again
-                    "n_neighbors": DEFAULT_UMAP_N_NEIGHBORS,
-                    "n_components": DEFAULT_N_COMPONENTS,
-                    "min_cluster_size": DEFAULT_HDBSCAN_MIN_CLUSTER_SIZE,
-                }
-            elif not HDBSCAN_AVAILABLE:
-                print("HDBSCAN not found, cannot perform tuning. Skipping.")
-                TUNING_METHOD = "none"  # Force skip
-                best_params = {  # Set defaults again
-                    "n_neighbors": DEFAULT_UMAP_N_NEIGHBORS,
-                    "n_components": DEFAULT_N_COMPONENTS,
-                    "min_cluster_size": DEFAULT_HDBSCAN_MIN_CLUSTER_SIZE,
-                }
-            else:
-                best_params, tuning_results = bayesian_search(
-                    embeddings,
-                    SEARCH_SPACE,
-                    LABEL_LOWER_BOUND,
-                    LABEL_UPPER_BOUND,
-                    NUM_EVALS,
-                )
-                if best_params is None:
-                    print(
-                        "Bayesian search failed to find suitable parameters. Exiting."
-                    )
-                    exit()
-        else:
-            print(
-                f"Error: Invalid TUNING_METHOD '{TUNING_METHOD}'. Choose 'bayesian', 'random', or 'none'."
+            best_params, tuning_results = random_search(
+                embeddings,
+                SEARCH_SPACE,
+                NUM_EVALS,
+                LABEL_LOWER_BOUND,
+                LABEL_UPPER_BOUND,
             )
-            exit()
+            if best_params is None:
+                exit("Random search failed.")
+        elif TUNING_METHOD == "bayesian":
+            best_params, tuning_results = bayesian_search(
+                embeddings,
+                SEARCH_SPACE,
+                LABEL_LOWER_BOUND,
+                LABEL_UPPER_BOUND,
+                NUM_EVALS,
+            )
+            if best_params is None:
+                exit("Bayesian search failed.")
 
         # --- 3. Final Run with Best Parameters ---
         print(f"\n--- Running Final Clustering with Best Parameters ---")
@@ -728,20 +841,16 @@ if __name__ == "__main__":
 
         final_clusters = None
         final_umap_embeddings = None  # Embeddings reduced with best UMAP params
-        final_cluster_labels = np.full(
-            len(metadata_df), -1
-        )  # Default to noise if clustering fails
+        final_cluster_labels = np.full(len(metadata_df), -1)  # Default to noise
 
-        if HDBSCAN_AVAILABLE:
+        if HDBSCAN_AVAILABLE:  # Only run if HDBSCAN is present
             try:
-                # Rerun generate_clusters with the absolute best parameters found
-                # This ensures we get the cluster object and reduced embeddings corresponding to the best score
                 final_clusters, final_umap_embeddings = generate_clusters(
                     embeddings,
                     n_neighbors=best_params["n_neighbors"],
                     n_components=best_params[
                         "n_components"
-                    ],  # Use component count from tuning
+                    ],  # Use tuned component count
                     min_cluster_size=best_params["min_cluster_size"],
                     random_state=RANDOM_STATE,
                 )
@@ -757,9 +866,7 @@ if __name__ == "__main__":
                     metadata_df["cluster_label"] = final_cluster_labels
                     print("Added final 'cluster_label' column to metadata.")
                     if "cluster_label" not in potential_keys:
-                        potential_keys.insert(
-                            0, "cluster_label"
-                        )  # Add to potential keys for vis choice
+                        potential_keys.insert(0, "cluster_label")
                 else:
                     print(
                         f"Warning: Mismatch between final cluster labels ({len(final_cluster_labels)}) and metadata ({len(metadata_df)}). Skipping label assignment."
@@ -768,16 +875,16 @@ if __name__ == "__main__":
             except Exception as e:
                 print(f"\n--- Error during final clustering run --- Error: {e}")
                 traceback.print_exc()
-                print("Proceeding without cluster labels.")
+                print("Proceeding without final cluster labels.")
         else:
             print("HDBSCAN not available, skipping final clustering step.")
 
         # --- 4. Prepare Embeddings for Visualization ---
-        # We might need to re-run UMAP specifically for 2D/3D visualization
-        # if the best 'n_components' from tuning is different from VISUALIZATION_N_COMPONENTS
         print(
             f"\n--- Preparing Embeddings for {VISUALIZATION_N_COMPONENTS}D Visualization ---"
         )
+        embeddings_reduced_vis = None
+        # Check if final UMAP run already produced the desired dimensions
         if (
             final_umap_embeddings is not None
             and final_umap_embeddings.shape[1] == VISUALIZATION_N_COMPONENTS
@@ -785,79 +892,90 @@ if __name__ == "__main__":
             print("Using UMAP embeddings generated during the final clustering run.")
             embeddings_reduced_vis = final_umap_embeddings
         else:
-            # Rerun UMAP with the best n_neighbors but the target visualization components
+            # Need to rerun UMAP for visualization dimensions
+            current_ncomp = (
+                final_umap_embeddings.shape[1]
+                if final_umap_embeddings is not None
+                else best_params["n_components"]
+            )
             print(
-                f"Best 'n_components' ({best_params['n_components']}) differs from visualization target ({VISUALIZATION_N_COMPONENTS})."
+                f"Best/current 'n_components' ({current_ncomp}) differs from vis target ({VISUALIZATION_N_COMPONENTS})."
             )
             print(
                 f"Re-running UMAP with k={best_params['n_neighbors']} and target dim={VISUALIZATION_N_COMPONENTS}."
             )
             vis_reducer = umap.UMAP(
                 n_neighbors=best_params["n_neighbors"],
-                n_components=VISUALIZATION_N_COMPONENTS,  # Target dimensions for plot
-                min_dist=DEFAULT_UMAP_MIN_DIST,  # Use a default min_dist or best if tuned
+                n_components=VISUALIZATION_N_COMPONENTS,
+                min_dist=DEFAULT_UMAP_MIN_DIST,  # Use default or tune this too? For now, default.
                 metric="cosine",
                 random_state=RANDOM_STATE,
                 low_memory=True,
             )
             try:
-                embeddings_reduced_vis = vis_reducer.fit_transform(
-                    embeddings.astype(np.float32)
-                )
+                # Ensure input is float32 for UMAP
+                embeddings_float32 = embeddings.astype(np.float32)
+                if np.isnan(embeddings_float32).any():
+                    print("Warning: NaNs detected in embeddings before UMAP vis run.")
+                embeddings_reduced_vis = vis_reducer.fit_transform(embeddings_float32)
             except Exception as e:
-                print(
-                    f"Error running UMAP for visualization: {e}. Trying with default UMAP settings."
-                )
+                print(f"Error running UMAP for visualization: {e}.")
                 traceback.print_exc()
-                # Fallback to basic UMAP if the best params fail for vis dimensions
-                vis_reducer = umap.UMAP(
-                    n_components=VISUALIZATION_N_COMPONENTS, random_state=RANDOM_STATE
-                )
-                embeddings_reduced_vis = vis_reducer.fit_transform(
-                    embeddings.astype(np.float32)
-                )
+                print("Visualization might fail or be incorrect.")
+                # As a last resort, create dummy data of the right shape? Or just let it fail later?
+                # Let it fail later for now, providing None
 
         # --- 5. Visualize Results ---
-        color_key = (
-            "cluster_label"
-            if "cluster_label" in metadata_df.columns
-            else (potential_keys[0] if potential_keys else None)
-        )
-
-        if color_key is None:
-            print(
-                "Error: Cannot determine a column to color the plot by. No cluster labels and no other potential keys found."
+        if embeddings_reduced_vis is not None:
+            # Determine color key - prioritize cluster_label if available
+            color_key = (
+                "cluster_label"
+                if "cluster_label" in metadata_df.columns
+                else (potential_keys[0] if potential_keys else None)
             )
+
+            if color_key is None:
+                print(
+                    "Error: Cannot determine a column to color the plot by. Visualization skipped."
+                )
+            else:
+                print(
+                    f"\nVisualizing results colored by '{color_key}' using best parameters..."
+                )
+                plot_title = (
+                    f"{VISUALIZATION_N_COMPONENTS}D UMAP Viz "
+                    f"(Params: k={best_params['n_neighbors']}, comp={best_params['n_components']}, mcs={best_params['min_cluster_size']}) | "
+                    f"Color: '{color_key}'"
+                )
+
+                visualize_embeddings_plotly(
+                    embeddings_reduced_vis,
+                    metadata_df,
+                    color_by_key=color_key,
+                    title=plot_title,
+                    filter_outliers=VISUALIZATION_FILTER_OUTLIERS,
+                    outlier_quantile=VISUALIZATION_OUTLIER_QUANTILE,
+                )
         else:
             print(
-                f"\nVisualizing results colored by '{color_key}' using best parameters..."
-            )
-            plot_title = (
-                f"{VISUALIZATION_N_COMPONENTS}D UMAP+HDBSCAN Visualization "
-                f"(k={best_params['n_neighbors']}, comps={best_params['n_components']}, mcs={best_params['min_cluster_size']}) - "
-                f"Colored by '{color_key}'"
+                "Skipping visualization because reduced embeddings for visualization could not be generated."
             )
 
-            visualize_embeddings_plotly(
-                embeddings_reduced_vis,
-                metadata_df,
-                color_by_key=color_key,
-                title=plot_title,
-                filter_outliers=VISUALIZATION_FILTER_OUTLIERS,
-                outlier_quantile=VISUALIZATION_OUTLIER_QUANTILE,
+        # --- 6. Save Tuning Results ---
+        if TUNING_METHOD in ["random", "bayesian"] and tuning_results is not None:
+            print("\n--- Saving Tuning Results ---")
+            save_hyperopt_results(
+                results=tuning_results,
+                tuning_method=TUNING_METHOD,
+                num_evals=NUM_EVALS,
+                output_dir=HYPEROPT_DIR,  # Pass the defined Path object
             )
+        else:
+            print("\n--- No tuning results to save ---")
 
         print("\nScript finished.")
-        # Optionally save the tuning results dataframe or best parameters
-        if tuning_results is not None and isinstance(tuning_results, pd.DataFrame):
-            results_filename = f"tuning_results_{TUNING_METHOD}_{NUM_EVALS}evals.csv"
-            tuning_results.to_csv(results_filename, index=False)
-            print(f"Saved tuning results to {results_filename}")
-        elif tuning_results is not None and isinstance(tuning_results, Trials):
-            # Saving hyperopt trials can be done using pickle, but can be complex
-            # For simplicity, just log the best params found (already done)
-            pass
 
+    # --- Error Handling ---
     except FileNotFoundError as e:
         print(f"\n--- Error: File Not Found --- \n{e}")
     except ValueError as e:
@@ -865,9 +983,6 @@ if __name__ == "__main__":
         traceback.print_exc()
     except ImportError as e:
         print(f"\n--- Error: Import Error --- \n{e}")
-        print(
-            "Check installations: pip install chromadb pandas numpy plotly umap-learn hdbscan hyperopt tqdm python-dotenv"
-        )
     except Exception as e:
         print(f"\n--- An unexpected error occurred ---")
         print(f"Error: {e}")

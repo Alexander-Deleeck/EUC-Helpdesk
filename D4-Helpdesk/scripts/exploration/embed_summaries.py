@@ -12,7 +12,7 @@ from pathlib import Path
 import chromadb
 import chromadb.utils.embedding_functions as embedding_functions
 import tiktoken
-#from utils import clean_custom_fields, clean_email_content
+# from utils_cleaning import clean_custom_fields, clean_email_content
 # Load environment variables from .env file
 load_dotenv()
 
