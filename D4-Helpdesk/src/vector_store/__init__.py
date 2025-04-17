@@ -1,0 +1,1 @@
+# This file makes Python treat the 'vector_store' directory as a package. 

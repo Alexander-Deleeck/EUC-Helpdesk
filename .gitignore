@@ -17,3 +17,5 @@ projects_report_template.md
 *.json
 *.yaml
 *.yml
+*.cpython-312.pyc
+*.pyc
