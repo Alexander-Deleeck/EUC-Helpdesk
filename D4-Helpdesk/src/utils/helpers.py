@@ -2,8 +2,10 @@
 General utility functions used across different modules.
 """
 
+from bs4 import BeautifulSoup
 import glob
 import os
+import re
 import time
 import logging
 import numpy as np
@@ -13,6 +15,7 @@ from typing import Dict, Any, List, Optional, Union
 import traceback
 from datetime import datetime
 
+import spacy
 import tiktoken
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -382,6 +385,95 @@ def count_tokens(text: str) -> int:
     if tokenizer and text:
         return len(tokenizer.encode(text))
     return 0
+
+
+def replace_email_addresses(text: str) -> str:
+    """Replaces email addresses with generic 'email@domain.com'."""
+    email_pattern = re.compile(
+        r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b',
+        re.IGNORECASE
+    )
+    return email_pattern.sub('email@domain.com', text)
+
+def replace_phone_numbers(text: str) -> str:
+    """Replaces phone numbers with generic 'PHONE_NUMBER'."""
+    phone_pattern = re.compile(
+        r'''
+        (?:(?:Tel(?:ephone)?|Phone|Mobile|T|Fax|GSM)\.?\s*[:\-]?\s*)?  # optional prefix
+        (?:\+?\(?\d{1,4}\)?\s*(?:\(0\))?\s*)?                 # country code and optional (0)
+        (?:\d{1,4}[\s\-]?){2,5}                               # main number body
+        ''',
+        re.VERBOSE | re.IGNORECASE
+    )
+    return phone_pattern.sub('PHONE_NUMBER', text)
+
+
+def replace_person_names(text: str, placeholder: str = "PERSON_NAME") -> str:
+    """
+    Replaces person names in `text` with `placeholder`.  
+    First uses spaCy NER to find PERSON spans, then a regex fallback
+    to catch any leftover Title‑Case multi‑word sequences.
+    """
+    # regex fallback: sequences of 2+ Title‑Case words
+    TITLE_CASE_NAMES = re.compile(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,})\b')
+    
+    doc = nlp(text)
+    spans = []
+    # collect all PERSON entities
+    for ent in doc.ents:
+        if ent.label_.upper() in ("PER", "PERSON"):
+            spans.append((ent.start_char, ent.end_char))
+    # replace in reverse order so indices stay valid
+    redacted = text
+    for start, end in sorted(spans, reverse=True):
+        redacted = redacted[:start] + placeholder + redacted[end:]
+    # fallback regex pass
+    redacted = TITLE_CASE_NAMES.sub(placeholder, redacted)
+    return redacted
+
+
+
+def clean_formatting(text: str) -> str:
+    """
+    Removes common markup/formatting from text, including:
+      - HTML tags
+      - horizontal rules (---, ***, ___)
+      - Markdown headings, bold/italic, code blocks and inline code
+      - Markdown links & images
+      - blockquotes (>), list bullets (-, *, +)
+      - leftover empty lines
+    """
+    # 1) Strip HTML tags
+    text = BeautifulSoup(text, "html.parser").get_text(separator="\n")
+
+    # 2) Remove Markdown/Fenced code blocks
+    text = re.sub(r"```.+?```", "", text, flags=re.DOTALL)
+
+    # 3) Remove horizontal rules (---, ***, ___) on their own line
+    text = re.sub(r"(?m)^[ \t]*([-*_]){3,}[ \t]*$", "", text)
+
+    # 4) Strip Markdown headings
+    text = re.sub(r"(?m)^[ \t]{0,3}#{1,6}[ \t]*", "", text)
+
+    # 5) Unwrap inline code and bold/italic, but keep the text
+    text = re.sub(r"`([^`]+)`", r"\1", text)
+    text = re.sub(r"\*\*([^*]+)\*\*", r"\1", text)
+    text = re.sub(r"\*([^*]+)\*",   r"\1", text)
+    text = re.sub(r"__([^_]+)__",   r"\1", text)
+    text = re.sub(r"_([^_]+)_",     r"\1", text)
+
+    # 6) Remove images and links (leave link text)
+    text = re.sub(r"!\[.*?\]\(.*?\)", "", text)               # images
+    text = re.sub(r"\[([^\]]+)\]\((?:.*?)\)", r"\1", text)     # links
+
+    # 7) Strip blockquotes and list bullets at start of lines
+    text = re.sub(r"(?m)^[ \t]{0,3}>\s?", "", text)            # blockquotes
+    text = re.sub(r"(?m)^[ \t]*[-+*]\s+", "", text)            # bullets
+
+    # 8) Collapse multiple blank lines to one
+    text = re.sub(r"\n{2,}", "\n\n", text)
+
+    return text.strip()
 
 
 # Example Usage (for testing)
