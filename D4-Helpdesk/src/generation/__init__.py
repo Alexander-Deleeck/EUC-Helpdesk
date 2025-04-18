@@ -56,8 +56,10 @@ def get_llm_completion(
     logger.error(f"Failed to get LLM completion after {max_retries} retries.")
     return None
 
+
+
 # --- Helper Function for Parsing LLM Response ---
-def parse_llm_response(response_text: str) -> Tuple[str, str]:
+def parse_generated_label(response_text: str) -> Tuple[str, str]:
     """Parses the Title and Description from the LLM response string."""
     title = "Error: Could not parse title"
     description = "Error: Could not parse description"
@@ -76,3 +78,13 @@ def parse_llm_response(response_text: str) -> Tuple[str, str]:
     if description.lower().startswith("description:"): description = description[len("description:"):].strip()
 
     return title, description
+
+
+def parse_generated_email(response_text: str) -> str:
+    """Parses the Email from the LLM response string."""
+    email = "Error: Could not parse email"
+    if not response_text:
+        return email
+    if response_text.lower().startswith("email:"):
+        email = response_text[len("email:"):].strip()
+    return email

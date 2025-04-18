@@ -12,7 +12,8 @@ Example:
   python scripts/5_label_clusters.py --dataset helpdesk --sample_size 15
   python scripts/5_label_clusters.py --dataset helpdesk --assignments_file ./data/cluster_assignments/helpdesk_assignments_20231027_103000.csv
 """
-
+import statistics
+from time import perf_counter
 import argparse
 import logging
 from pathlib import Path
@@ -27,6 +28,7 @@ from typing import Optional, Tuple, List
 from dotenv import load_dotenv
 from openai import AzureOpenAI, APIError, RateLimitError
 from tqdm import tqdm 
+import spacy
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -41,22 +43,22 @@ try:
     from src import config
     from src.vector_store import client as vs_client, ops as vs_ops
     from src.utils import helpers # Import helpers, including the new ones
-    from src.generation import get_llm_completion, parse_llm_response
+    from src.generation import get_llm_completion, parse_generated_label, parse_generated_email
 except ImportError as e:
     logger.error(f"Error importing src modules: {e}. Make sure the script is run from the project root or src is in PYTHONPATH.")
     sys.exit(1)
 
 # --- Constants ---
 # Default prompt template - consider making this configurable if needed
-PROMPT_TEMPLATE = """You are an AI assistant specialized in analyzing and summarizing clusters of text documents with similar content, specifically helpdesk tickets or similar support interactions with the European Commission Helpdesk.
+PROMPT_TEMPLATE_LABEL = """You are an AI assistant specialized in analyzing and summarizing clusters of text documents with similar content, specifically helpdesk tickets or similar support interactions with the European Commission Helpdesk.
 
-Based *only* on the following {num_samples} example documents from a single cluster, please perform the following tasks:
-1.  **Generate a concise, descriptive Title** (maximum 10 words) that captures the core topic or issue of this cluster. The title should be specific and informative.
-2.  **Generate a brief Description** (1-2 sentences) summarizing the main theme, common problem, or type of request represented by the documents in this cluster.
+Based *only* on the following summaries of {num_samples} example helpdesk tickets from a single cluster, please perform the following tasks:
+1.  **Generate a concise, descriptive Title** (maximum 15 words) that captures the core topic or issue of this cluster. The title should be specific and informative.
+2.  **Generate a brief Description** (1-2 sentences) summarizing the main theme, common problem, or type of request represented by the summaries in this cluster.
 
-Cluster Context: The documents represent helpdesk tickets or support requests. Focus on the problem or request being made.
+Cluster Context: The summaries represent english summaries of helpdesk tickets or support requests. Focus on the problem or request being made.
 
-Example Documents:
+Example Summaries:
 {document_samples}
 
 ---
@@ -67,6 +69,23 @@ Title: <Your generated title here>
 Description: <Your generated description here>
 """
 
+
+PROMPT_TEMPLATE_EMAIL = """You are an AI assistant specialized in analyzing and summarizing clusters of text documents with similar content, specifically helpdesk tickets or similar support interactions with the European Commission Helpdesk.
+
+Based *only* on the following {num_samples} examples of helpdesk email tickets from a single cluster, please perform the following task:
+1.  **Generate a representative new email** that could be sent to the helpdesk by a user, based on the examples. The email should be in english and capture the main theme, common problem, or type of request represented by the examples.
+
+Cluster Context: The emails represent helpdesk tickets or support requests. Focus on the problem or request being made.
+
+Example Documents:
+{document_samples}
+
+---
+Output Instructions:
+Provide your response *only* in the following format, with no additional explanation or commentary:
+
+Email: <Your generated email here>
+"""
 
 
 def main(args):
@@ -89,6 +108,7 @@ def main(args):
         # max_prompt_tokens = llm_defaults.get('max_prompt_tokens', 3000) # Optional: for token-based truncation
         llm_temperature = llm_defaults.get('llm_temperature', 0.2)
         llm_max_tokens = llm_defaults.get('llm_max_tokens', 500) # For the response
+        llm_max_tokens_email = llm_defaults.get('llm_max_tokens_email', 2000) # For the email
         logger.info(f"Using sample size: {sample_size}")
         logger.info(f"Max chars per doc in prompt: {max_chars_per_doc}")
 
@@ -175,15 +195,15 @@ def main(args):
         retrieved_ids = retrieved_data.get('ids', [])
         logger.info(f"Data type of ID from retrieved_ids:\t{retrieved_ids[0]} = {type(retrieved_ids[0])}\n\n")
         retrieved_docs = retrieved_data.get('documents', [])
-        # retrieved_metadatas = retrieved_data.get('metadatas', [{} for _ in retrieved_ids]) # Handle missing metadata
+        retrieved_metadatas = retrieved_data.get('metadatas', [{} for _ in retrieved_ids]) # Handle missing metadata
 
         if len(retrieved_ids) != len(all_data_ids):
              logger.warning(f"Requested {len(all_data_ids)} docs, but retrieved {len(retrieved_ids)}. Some IDs might be missing in the vector store.")
 
         for idx, doc_id in enumerate(retrieved_ids):
             if idx < len(retrieved_docs):
-                 document_map[doc_id] = retrieved_docs[idx]
-            # Add metadata if needed: document_map[doc_id] = {'document': retrieved_docs[idx], 'metadata': retrieved_metadatas[idx]}
+                # document_map[doc_id] = retrieved_docs[idx]
+                document_map[doc_id] = {'document': retrieved_docs[idx], 'metadata': retrieved_metadatas[idx]}
 
         logger.info(f"Successfully loaded {len(document_map)} documents from vector store.")
 
@@ -195,8 +215,18 @@ def main(args):
     cluster_labels = sorted([l for l in assignments_df['cluster_label'].unique() if l != -1]) # Exclude noise (-1)
     logger.info(f"Found {len(cluster_labels)} non-noise clusters to label.")
 
+
+    # Initialize spaCy NER model
+    ner_model: spacy.Language = spacy.load("xx_ent_wiki_sm")
+    
+    # Initialize timing metrics
+    cluster_processing_times = []
+    
     results_list = []
     for idx, cluster_label in enumerate(tqdm(cluster_labels, desc="Labeling Clusters")):
+        start_time = perf_counter()
+        if idx < 4:
+            continue
         if idx > 8:
             break
         logger.info(f"\n\n{'-'*100}\n\nProcessing Cluster {cluster_label}\n{'-'*100}\n\n")
@@ -230,18 +260,22 @@ def main(args):
         # Optional: Implement token-based truncation here if needed
         # current_token_count = 0
         # tokenizer = helpers.get_tokenizer() # Ensure tokenizer is available
-        sampled_docs_formatted = []
+        sampled_summaries_formatted = []
+        sampled_emails_formatted = []
         for i, doc in enumerate(sampled_docs_raw):
-            truncated_doc = helpers.truncate_text(doc, max_chars_per_doc)
+            truncated_doc = helpers.truncate_text(doc['document'], max_chars_per_doc)
+            cleaned_email = helpers.clean_email(doc['metadata']['Description'], ner_model)
+            
             # Optional Token Check:
             # doc_tokens = helpers.count_tokens(truncated_doc)
             # if tokenizer and (current_token_count + doc_tokens) > max_prompt_tokens:
             #    logger.warning(f"Token limit ({max_prompt_tokens}) reached for cluster {cluster_label}. Stopping sample inclusion early.")
             #    break
             # current_token_count += doc_tokens
-            sampled_docs_formatted.append(f"--- Document {i+1} ---\n{truncated_doc}\n-----------\n")
-
-        if not sampled_docs_formatted:
+            sampled_summaries_formatted.append(f"--- Document {i+1} ---\n{truncated_doc}\n-----------\n")
+            sampled_emails_formatted.append(f"--- Email {i+1} ---\nSUMMARY:\n{truncated_doc}\nCONTENT:\n{cleaned_email}\n-----------\n")
+            
+        if not sampled_summaries_formatted:
             logger.warning(f"No valid documents could be sampled or formatted for cluster {cluster_label}. Skipping LLM call.")
             results_list.append({
                 'cluster_label': cluster_label,
@@ -254,49 +288,84 @@ def main(args):
             })
             continue
 
-        documents_string = "\n".join(sampled_docs_formatted)
+        title_string = "\n".join(sampled_summaries_formatted)
+        email_string = "\n".join(sampled_emails_formatted)
 
         # Construct the prompt
-        prompt = PROMPT_TEMPLATE.format(
-            num_samples=len(sampled_docs_formatted), # Use actual number formatted
-            document_samples=documents_string
+        prompt_title = PROMPT_TEMPLATE_LABEL.format(
+            num_samples=len(sampled_summaries_formatted), # Use actual number formatted
+            document_samples=title_string
         )
-        logger.debug(f"Generated Prompt (first 300 chars): {prompt[:300]}...")
+        
+        prompt_email = PROMPT_TEMPLATE_EMAIL.format(
+            num_samples=len(sampled_emails_formatted), # Use actual number formatted
+            document_samples=email_string
+        )
+        logger.debug(f"Generated Prompt (first 300 chars): {prompt_title[:300]}...")
 
         
         # Call LLM
         logger.info(f"Sending request to LLM for cluster {cluster_label}...")
-        llm_response = get_llm_completion(
+        llm_response_label = get_llm_completion(
             client=llm_client,
-            prompt=prompt,
+            prompt=prompt_title,
             deployment_name=azure_deployment,
             temperature=llm_temperature,
             max_tokens=llm_max_tokens
         )
+        llm_response_email = get_llm_completion(
+            client=llm_client,
+            prompt=prompt_email,
+            deployment_name=azure_deployment,
+            temperature=llm_temperature,
+            max_tokens=llm_max_tokens_email
+        )
 
         # Parse response
-        if llm_response:
-            title, description = parse_llm_response(llm_response)
-            logger.info(f"Cluster {cluster_label} | Title: {title} | Description: {description}")
+        if llm_response_label:
+            cluster_title, cluster_description = parse_generated_label(llm_response_label)
+            logger.info(f"Cluster {cluster_label} | Title: {cluster_title} | Description: {cluster_description}")
+        if llm_response_email:
+            cluster_email = parse_generated_email(llm_response_email)
+            logger.info(f"Cluster {cluster_label} | Email: {cluster_email}")
         else:
             logger.error(f"LLM call failed for cluster {cluster_label}. Using error placeholders.")
-            title = "Error: LLM call failed"
-            description = "Error: LLM call failed"
+            cluster_title = "Error: LLM call failed"
+            cluster_description = "Error: LLM call failed"
 
         # Store results
         results_list.append({
             'cluster_label': cluster_label,
             'cluster_size': cluster_size,
-            'sample_size_used': len(sampled_docs_formatted),
+            'sample_size_used': len(sampled_summaries_formatted),
             'sampled_doc_ids': sampled_ids,
-            'generated_title': title,
-            'generated_description': description,
-            'llm_response_raw': llm_response if llm_response else "" # Store raw response for debugging
+            'generated_cluster_title': cluster_title,
+            'generated_cluster_description': cluster_description,
+            'generated_cluster_email': cluster_email,
+            'llm_response_raw_label': llm_response_label if llm_response_label else "", # Store raw response for debugging
+            'llm_response_raw_email': llm_response_email if llm_response_email else "", # Store raw response for debugging
         })
 
         # Optional: Add a small delay to avoid hitting rate limits aggressively
-        time.sleep(3) # Adjust as needed
-
+        # At the end of the loop, before the sleep
+        end_time = perf_counter()
+        processing_time = end_time - start_time
+        cluster_processing_times.append(processing_time)
+        time.sleep(20) # Adjust as needed
+    
+    # After all clusters are processed, calculate and log statistics
+    if cluster_processing_times:
+        avg_time = statistics.mean(cluster_processing_times)
+        min_time = min(cluster_processing_times)
+        max_time = max(cluster_processing_times)
+        
+        logger.info("\n" + "="*50)
+        logger.info("Cluster Processing Performance Metrics:")
+        logger.info(f"\tAverage time per cluster: {avg_time:.2f} seconds")
+        logger.info(f"\tFastest processing time: {min_time:.2f} seconds")
+        logger.info(f"\tSlowest processing time: {max_time:.2f} seconds")
+        logger.info("="*50 + "\n") 
+        
     # 6. Save Results
     if not results_list:
         logger.warning("No cluster labels were generated.")

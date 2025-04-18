@@ -395,6 +395,7 @@ def replace_email_addresses(text: str) -> str:
     )
     return email_pattern.sub('email@domain.com', text)
 
+
 def replace_phone_numbers(text: str) -> str:
     """Replaces phone numbers with generic 'PHONE_NUMBER'."""
     phone_pattern = re.compile(
@@ -408,16 +409,24 @@ def replace_phone_numbers(text: str) -> str:
     return phone_pattern.sub('PHONE_NUMBER', text)
 
 
-def replace_person_names(text: str, placeholder: str = "PERSON_NAME") -> str:
+def replace_person_names(ner_model: spacy.Language, text: str, placeholder: str = "PERSON_NAME") -> str:
     """
     Replaces person names in `text` with `placeholder`.  
     First uses spaCy NER to find PERSON spans, then a regex fallback
     to catch any leftover Title‑Case multi‑word sequences.
+    
+    Args:
+        ner_model: spaCy NER model (e.g. "xx_ent_wiki_sm")
+        text: text to replace person names in
+        placeholder: placeholder to replace person names with
+
+    Returns:
+        text with person names replaced with placeholder
     """
     # regex fallback: sequences of 2+ Title‑Case words
     TITLE_CASE_NAMES = re.compile(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,})\b')
     
-    doc = nlp(text)
+    doc = ner_model(text)
     spans = []
     # collect all PERSON entities
     for ent in doc.ents:
@@ -433,7 +442,7 @@ def replace_person_names(text: str, placeholder: str = "PERSON_NAME") -> str:
 
 
 
-def clean_formatting(text: str) -> str:
+def remove_email_formatting(text: str) -> str:
     """
     Removes common markup/formatting from text, including:
       - HTML tags
@@ -475,6 +484,31 @@ def clean_formatting(text: str) -> str:
 
     return text.strip()
 
+def clean_email(email_text: str, ner_model: spacy.Language) -> str:
+    """
+    Cleans email text by applying:
+        1. removal of common formatting and markup.
+        2. anonymization of p.i.i via:
+            a) replacement of email addresses with generic 'email@domain.com'
+            b) replacement of phone numbers with generic 'PHONE_NUMBER'
+            c) replacement of person names with generic 'PERSON_NAME'
+
+    Args:
+        email_text: The email text to clean.
+        ner_model: spaCy NER model (e.g. "xx_ent_wiki_sm")
+
+    Returns:
+        cleaned email text
+    """
+    # 1. remove common formatting and markup
+    cleaned_text = remove_email_formatting(email_text)
+
+    # 2. anonymize PII
+    cleaned_text = replace_email_addresses(cleaned_text)
+    cleaned_text = replace_phone_numbers(cleaned_text)
+    cleaned_text = replace_person_names(ner_model, cleaned_text)
+
+    return cleaned_text
 
 # Example Usage (for testing)
 # if __name__ == "__main__":
