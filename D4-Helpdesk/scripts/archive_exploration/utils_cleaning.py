@@ -204,8 +204,8 @@ def clean_description_content(text):
 UNWANTED_SUMMARY_PATTERNS = re.compile(
     r"""(?ix)                # Case-insensitive and verbose mode
     (?:
-        ^hd\s*cannot\s*answer$ |              # Exact match for "HD cannot answer"
-        hd[0-9]*\s*cannot\s*(?:help|answer) | # Variations with HD1, HD2, etc.
+        ^hd\s*(?:cannot|can't|can not)\s*(?:help|answer) |              # Exact match for "HD cannot answer"
+        hd[0-9]*\s*(?:cannot|can't|can not)\s*(?:help|answer) | # Variations with HD1, HD2, etc.
         not\s+related\s+to\s+op |             # Not related to OP
         more\s+info(?:rmation)?\s+(?:needed|required) |  # More info variations
         not\s+enough\s+info(?:rmation)?\s+for\s+hd[0-9]* | # Not enough info for HD1, etc.
@@ -224,7 +224,7 @@ def clean_summary_content(text):
         return ""
         
     # Remove common email prefixes
-    text = re.sub(r"(?i)(?:subject|fwd|fw|re):\s*", "", text)
+    text = re.sub(r"(?i)(?:subject|fwd|fw|re):\s*", "", text, flags=re.IGNORECASE)
     # Normalize whitespace
     return text.strip().lower()
 

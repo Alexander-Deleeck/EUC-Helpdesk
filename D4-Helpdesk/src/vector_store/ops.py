@@ -184,27 +184,36 @@ def get_all_data(collection: chromadb.Collection, include: List[str] = ["metadat
 
         # Construct DataFrame
         data_dict = {'id': results['ids']}
-        if 'embeddings' in include and results.get('embeddings'):
-            data_dict['embedding'] = results['embeddings']
+        logger.debug(f"Results: {results['ids'][:5]}")
+        # Handle embeddings separately due to their 2D nature
+        embeddings = results.get('embeddings')
+        if 'embeddings' in include and embeddings is not None and len(embeddings) > 0:
+            # Convert each embedding vector to a list to ensure proper DataFrame handling
+            data_dict['embedding'] = [list(emb) for emb in embeddings]
+            logger.info(f"Embeddings shape: {len(embeddings)}x{len(embeddings[0])}")
+        
         if 'documents' in include and results.get('documents'):
             data_dict['document'] = results['documents']
+            
+        # Create initial DataFrame
+        temp_df = pd.DataFrame(data_dict)
+        
+        # Handle metadata separately
         if 'metadatas' in include and results.get('metadatas'):
             # Convert list of metadata dicts into DataFrame columns
             metadata_df = pd.DataFrame(results['metadatas'])
-            # Combine with the main data_dict
-            temp_df = pd.DataFrame(data_dict)
             # Reset index if metadata_df aligns, otherwise need careful merge
             if len(metadata_df) == len(temp_df):
-                 df_all = pd.concat([temp_df.reset_index(drop=True), metadata_df.reset_index(drop=True)], axis=1)
+                df_all = pd.concat([temp_df.reset_index(drop=True), metadata_df.reset_index(drop=True)], axis=1)
             else:
-                 logger.warning("Metadata length mismatch, returning only IDs, embeddings, documents.")
-                 df_all = temp_df
+                logger.warning("Metadata length mismatch, returning only IDs, embeddings, documents.")
+                df_all = temp_df
         else:
-            df_all = pd.DataFrame(data_dict)
+            df_all = temp_df
 
         # Set ID as index
-        if 'id' in df_all.columns:
-            df_all = df_all.set_index('id')
+        # if 'id' in df_all.columns:
+        #     df_all = df_all.set_index('id')
 
         logger.info(f"Successfully retrieved {len(df_all)} items into DataFrame (Shape: {df_all.shape}).")
         return df_all

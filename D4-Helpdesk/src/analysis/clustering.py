@@ -5,7 +5,7 @@ Includes scoring functions for optimization.
 
 import logging
 import numpy as np
-from typing import Dict, Any, Optional, Union
+from typing import Dict, Any, Optional, Union, List
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -150,10 +150,11 @@ def score_clusters(
         elif label_upper_bound is not None and label_count > label_upper_bound:
             penalty = 1.0
             logger.debug(f"Adding penalty: Cluster count {label_count} > upper bound {label_upper_bound}")
-
-        final_score = score + penalty
-        logger.debug(f"Final score: {final_score:.4f} (Noise Fraction: {score:.4f}, Penalty: {penalty:.1f}, Labels: {label_count})")
-        return final_score
+        
+        return label_count, noise_fraction
+        #final_score = score + penalty
+        #logger.debug(f"Final score: {final_score:.4f} (Noise Fraction: {score:.4f}, Penalty: {penalty:.1f}, Labels: {label_count})")
+        #return final_score
 
     except Exception as e:
         logger.error(f"Error scoring clusters: {e}", exc_info=True)

@@ -39,25 +39,46 @@ AZURE_OPENAI_EMBEDDING_MODEL_NAME = os.getenv("AZURE_OPENAI_EMBEDDING_MODEL_NAME
 
 # --- Default Analysis Parameters (Can be overridden in dataset config or scripts) ---
 DEFAULT_UMAP_PARAMS = {
-    "n_neighbors": 15,
-    "n_components": 5,
-    "min_dist": 0.0,
+    "n_neighbors": 40, #15,7,25,5
+    "n_components": 7,#5,
+    "min_dist": 0.1,
     "metric": "cosine",
     # Add other relevant UMAP defaults
 }
 
 DEFAULT_HDBSCAN_PARAMS = {
-    "min_cluster_size": 15,
+    "min_cluster_size": 25,#15,
     "metric": "euclidean",
     "cluster_selection_method": "eom",
     # Add other relevant HDBSCAN defaults
 }
 
+# --- Search Space Configuration ---
+DEFAULT_SEARCH_SPACE = {
+    # Parameter ranges for optimization
+    "n_neighbors": {
+        "range": (5, 51, 5),  # (start, end, step)
+        "type": "choice"  # For hyperopt compatibility
+    },
+    "n_components": {
+        "range": (3, 16, 2),
+        "type": "choice"
+    },
+    "min_cluster_size": {
+        "range": (5, 31, 5),
+        "type": "choice"
+    }
+}
+
+# Update DEFAULT_OPTIMIZATION_PARAMS to include additional settings
 DEFAULT_OPTIMIZATION_PARAMS = {
-    "random_state": 42,
-    "max_evals_random": 100,
-    "max_evals_bayesian": 100,
-    # Add other optimization defaults
+    "random_state": None,
+    "max_evals_random": 30,
+    "max_evals_bayesian": 30,
+    "prob_threshold": 0.05,  # Minimum probability for a point to be considered 'well clustered'
+    "label_lower_bound": 10,  # Minimum expected number of meaningful clusters
+    "label_upper_bound": 75,  # Maximum expected number of meaningful clusters
+    "search_space": DEFAULT_SEARCH_SPACE  # Add the search space configuration
 }
 
 # --- Dataset Specific Configurations ---
@@ -69,9 +90,11 @@ DATASET_CONFIGS = {
         "name": "helpdesk", # Added for clarity/potential use in naming
         "raw_path_pattern": RAW_DATA_DIR / "helpdesk_dataset1" / "Export *.csv", # Example subfolder
         "processed_path_template": PROCESSED_DATA_DIR / "helpdesk_dataset1" / "{}_cleaned.csv", # Example subfolder
-        "vector_store_path": VECTOR_STORE_DIR / "helpdesk_dataset1_chroma",
+        "vector_store_path": VECTOR_STORE_DIR / 'chroma_summaries',#'"helpdesk_dataset1_chroma",
         "hyperopt_path": HYPEROPT_DIR / "helpdesk_dataset1",
-        "vector_store_collection_name": "helpdesk_summaries_embeddings",
+        "vector_store_collection_name": "helpdesk_complete_summaries_embeddings",
+        "cluster_results_path": VECTOR_STORE_DIR / 'cluster_assignments',
+        "cluster_labels_path": VECTOR_STORE_DIR / 'cluster_labels',
 
         # --- Data Loading & Schema ---
         "columns_to_load": None, # Load all initially, or specify: ["Summary", "Issue key", ...]
@@ -93,7 +116,26 @@ DATASET_CONFIGS = {
         # --- Analysis Parameters (Optional Overrides) ---
         "umap_params": DEFAULT_UMAP_PARAMS, # Use defaults or override: {"n_neighbors": 10, ...}
         "hdbscan_params": DEFAULT_HDBSCAN_PARAMS,
-        "optimization_params": DEFAULT_OPTIMIZATION_PARAMS,
+        "optimization_params": {
+            "max_evals_bayesian": 10,
+            "prob_threshold": 0.05,
+            "label_lower_bound": 20,
+            "label_upper_bound": 150,
+            "search_space": {
+                "n_neighbors": {
+                    "range": (5, 51, 5),
+                    "type": "choice"
+                },
+                "n_components": {
+                    "range": (3, 16, 2),
+                    "type": "choice"
+                },
+                "min_cluster_size": {
+                    "range": (50, 100, 10),
+                    "type": "choice"
+                }
+            }
+        },
     },
     "other_dataset": {
         # --- Paths ---

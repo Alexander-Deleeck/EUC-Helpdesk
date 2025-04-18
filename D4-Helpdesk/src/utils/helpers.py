@@ -2,13 +2,18 @@
 General utility functions used across different modules.
 """
 
+import glob
+import os
 import time
 import logging
+import numpy as np
 import pandas as pd
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Union
 import traceback
+from datetime import datetime
 
+import tiktoken
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -215,6 +220,169 @@ def save_dataframe(
     except Exception as e:
         logger.error(f"Failed to save DataFrame to {output_path}: {e}", exc_info=True)
         return False
+
+def ensure_dir(path: Path) -> bool:
+    """
+    Creates a directory and any necessary parent directories if they don't exist.
+
+    Args:
+        path: A Path object representing the directory to create.
+
+    Returns:
+        True if the directory exists or was created successfully, False otherwise.
+    """
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        logger.info(f"Directory ensured: {path}")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to create directory {path}: {e}", exc_info=True)
+        return False
+
+
+def save_cluster_assignments(
+    assignments_df: pd.DataFrame,
+    output_dir: str,
+    filename_prefix: str = "cluster_assignments"
+) -> str:
+    """
+    Saves the DataFrame containing data IDs and cluster labels to a CSV file.
+
+    Args:
+        assignments_df: DataFrame with columns like 'data_id' and 'cluster_label'.
+        output_dir: The directory to save the file in.
+        filename_prefix: Prefix for the output filename.
+
+    Returns:
+        The full path to the saved file, or None if saving failed.
+    """
+    if not isinstance(assignments_df, pd.DataFrame):
+        logger.error("Invalid input: assignments_df must be a pandas DataFrame.")
+        return None
+    if 'data_id' not in assignments_df.columns or 'cluster_label' not in assignments_df.columns:
+        logger.error("DataFrame must contain 'data_id' and 'cluster_label' columns.")
+        return None
+    if not output_dir:
+        logger.error("Output directory not specified.")
+        return None
+
+    try:
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"{filename_prefix}_{timestamp}.csv"
+        full_path = output_path / filename
+
+        assignments_df.to_csv(full_path, index=False)
+        logger.info(f"Cluster assignments saved successfully to: {full_path}")
+        return str(full_path)
+
+    except Exception as e:
+        logger.error(f"Error saving cluster assignments: {e}", exc_info=True)
+        return None
+
+# --- Helper to Extract Best Params ---
+# This can live here or within the optimization script if preferred
+
+def get_best_params_from_results(
+    results: Union[pd.DataFrame, 'Trials'], # Use quotes for Trials if hyperopt is optional
+    tuning_method: str,
+    search_space: Dict[str, Any] # Needed for Bayesian space_eval
+) -> Optional[Dict[str, Any]]:
+    """
+    Extracts the best hyperparameter set from optimization results.
+
+    Args:
+        results: The results object (DataFrame for random, Trials for Bayesian).
+        tuning_method: 'random' or 'bayesian'.
+        search_space: The search space definition (required for Bayesian).
+
+    Returns:
+        A dictionary containing the best parameters found, or None on error.
+    """
+    best_params = None
+    try:
+        if tuning_method == 'random' and isinstance(results, pd.DataFrame) and not results.empty:
+            # Assuming 'loss' column exists and lower is better
+            best_run = results.loc[results['loss'].idxmin()]
+            # Extract parameters based on column names (needs to match objective fn)
+            # This is slightly fragile, depends on how results_df is structured
+            # Let's assume columns exist like 'n_neighbors', 'n_components', 'min_cluster_size' etc.
+            param_keys = [k for k in results.columns if k in search_space] # Find keys matching search space
+            best_params = best_run[param_keys].to_dict()
+            # Convert numpy types to native Python types if necessary
+            best_params = {k: v.item() if isinstance(v, np.generic) else v for k, v in best_params.items()}
+
+
+        elif tuning_method == 'bayesian':
+            # Check if hyperopt is available and results is a Trials object
+            from hyperopt import space_eval, Trials # Import locally if needed
+            if isinstance(results, Trials) and results.best_trial:
+                 # Use space_eval to convert best trial parameters (indices) back to values
+                 best_params = space_eval(search_space, results.argmin)
+
+        if best_params:
+            logger.info(f"Extracted best parameters: {best_params}")
+            return best_params
+        else:
+            logger.warning("Could not extract best parameters from results.")
+            return None
+
+    except Exception as e:
+        logger.error(f"Error extracting best parameters: {e}", exc_info=True)
+        return None
+
+
+
+def find_latest_file(directory: str, pattern: str) -> Optional[str]:
+    """Finds the most recently modified file in a directory matching a pattern."""
+    try:
+        dir_path = Path(directory)
+        if not dir_path.is_dir():
+            logger.error(f"Directory not found: {directory}")
+            return None
+
+        list_of_files = glob.glob(str(dir_path / pattern)) # Use glob for pattern matching
+        if not list_of_files:
+            logger.warning(f"No files found matching pattern '{pattern}' in '{directory}'.")
+            return None
+
+        latest_file = max(list_of_files, key=os.path.getmtime)
+        logger.info(f"Found latest file: {latest_file}")
+        print(f"\n\n\nLatest file:\n\n{latest_file}\n\n\n\n")
+        return latest_file
+    except Exception as e:
+        logger.error(f"Error finding latest file: {e}", exc_info=True)
+        return None
+
+def truncate_text(text: str, max_length: int) -> str:
+    """Truncates text to a maximum character length, adding ellipsis."""
+    if len(text) > max_length:
+        return text[:max_length-3] + "..."
+    return text
+
+# --- Optional: Token Counting Helper ---
+_tokenizer = None
+def get_tokenizer(encoding_name="cl100k_base"): # Encoding used by gpt-4, gpt-3.5-turbo, text-embedding-ada-002
+    """Initializes and returns a tiktoken tokenizer."""
+    global _tokenizer
+    if _tokenizer is None:
+        try:
+            _tokenizer = tiktoken.get_encoding(encoding_name)
+            logger.info(f"Initialized tokenizer with encoding: {encoding_name}")
+        except Exception as e:
+            logger.error(f"Failed to initialize tokenizer '{encoding_name}': {e}")
+            _tokenizer = None # Ensure it stays None if init fails
+    return _tokenizer
+
+def count_tokens(text: str) -> int:
+    """Counts tokens in a string using the initialized tokenizer."""
+    tokenizer = get_tokenizer()
+    if tokenizer and text:
+        return len(tokenizer.encode(text))
+    return 0
+
 
 # Example Usage (for testing)
 # if __name__ == "__main__":

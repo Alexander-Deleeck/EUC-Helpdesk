@@ -10,6 +10,7 @@ from typing import Dict, Any, Optional, Union, Tuple
 from functools import partial
 import random
 import time
+import hdbscan
 
 # Import necessary components from other analysis modules
 from .dimensionality_reduction import reduce_dimensions_umap, UMAP_AVAILABLE
@@ -133,7 +134,7 @@ def _objective_function(
         'n_neighbors': params['n_neighbors'],
         'n_components': params['n_components'],
         'metric': params.get('umap_metric', 'cosine'), # Allow overriding metric
-        'min_dist': params.get('umap_min_dist', 0.0)   # Allow overriding min_dist
+        'min_dist': params.get('umap_min_dist', 0.1)   # Allow overriding min_dist
     }
     hdbscan_p = {
         'min_cluster_size': params['min_cluster_size'],
@@ -152,18 +153,28 @@ def _objective_function(
     cluster_labels, clusterer = clustering_result
 
     # Score the clustering result
-    score = score_clusters(clusterer,
+    label_count, base_cost = score_clusters(clusterer,
                              prob_threshold=score_config.get('prob_threshold', 0.05),
                              label_lower_bound=score_config.get('label_lower_bound'),
                              label_upper_bound=score_config.get('label_upper_bound'))
 
-    label_count = len(np.unique(cluster_labels)) - (1 if -1 in cluster_labels else 0)
+    penalty = 0.0
+    lb = score_config.get('label_lower_bound')
+    ub = score_config.get('label_upper_bound')
+    if lb is not None and label_count < lb:
+        penalty = 0.15 # Use your desired penalty value
+    elif ub is not None and label_count > ub:
+        penalty = 0.15 # Use your desired penalty value
+
+    loss = base_cost + penalty
+
+    #label_count = len(np.unique(cluster_labels)) - (1 if -1 in cluster_labels else 0)
     eval_time = time.time() - start_time
 
-    logger.debug(f"Objective Eval | Params: {params} | Score: {score:.4f} | Labels: {label_count} | Time: {eval_time:.2f}s")
+    logger.debug(f"Objective Eval | Params: {params} | Loss/Score: {loss:.4f} | Labels: {label_count} | Time: {eval_time:.2f}s")
 
     return {
-        'loss': score,
+        'loss': loss,  # Use loss for minimization
         'status': STATUS_OK,
         'params': params, # Store the actual params used
         'label_count': label_count, # Store label count for analysis

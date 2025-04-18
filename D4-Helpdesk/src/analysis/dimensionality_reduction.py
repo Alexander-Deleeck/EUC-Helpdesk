@@ -4,7 +4,7 @@ Provides functions for dimensionality reduction, primarily using UMAP.
 
 import logging
 import numpy as np
-from typing import Dict, Any, Optional, Union
+from typing import Dict, Any, Optional, Union, List
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')

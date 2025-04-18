@@ -20,6 +20,7 @@ import pandas as pd
 import numpy as np
 import random
 import time
+import hdbscan
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -34,7 +35,10 @@ try:
     from src import config
     from src.vector_store import client as vs_client, ops as vs_ops
     from src.analysis import optimization as optim
+    from src.analysis import dimensionality_reduction as dr
+    from src.analysis import clustering as cl
     from src.utils import helpers
+    from src.utils.helpers import get_best_params_from_results
 except ImportError as e:
     logger.error(f"Error importing src modules: {e}. Make sure the script is run from the project root or src is in PYTHONPATH.")
     sys.exit(1)
@@ -73,20 +77,23 @@ def main(args):
         logger.error(f"Failed to setup ChromaDB client or collection: {e}", exc_info=True)
         sys.exit(1)
 
-    # 3. Load Embeddings from Vector Store
-    logger.info("Loading embeddings from vector store...")
-    # Only need embeddings for optimization
-    data_df = vs_ops.get_all_data(collection, include=["embeddings"])
+    # 3. Load Embeddings and IDs from Vector Store
+    logger.info("Loading embeddings and IDs from vector store...")
+    data_df = vs_ops.get_all_data(collection, include=["metadatas", "documents", "embeddings"])
 
-    if data_df is None or data_df.empty or 'embedding' not in data_df.columns:
-        logger.error("Failed to load embeddings or no embeddings found.")
+    logger.info(f"\n\n{'-'*100}\n\nData DataFrame: {data_df.head()}\n\n{'-'*100}\n\n")
+    logger.info(f"\n\nData DataFrame: {data_df.columns}\n\n{'-'*100}\n")
+    
+    if data_df is None or data_df.empty or 'embedding' not in data_df.columns or 'id' not in data_df.columns:
+        logger.error("Failed to load embeddings/IDs or required columns missing.")
         sys.exit(1)
 
     embeddings = np.array(data_df['embedding'].tolist())
+    data_ids = data_df['id'].tolist()
     logger.info(f"Loaded {embeddings.shape[0]} embeddings with dimension {embeddings.shape[1]}.")
+    logger.info(f"Loaded {len(data_ids)} corresponding data IDs.")
 
     # 4. Prepare Optimization Configuration
-    # Use defaults from config.py, allow overrides from active_config and CLI args
     default_opt_params = config.DEFAULT_OPTIMIZATION_PARAMS.copy()
     dataset_opt_params = active_config.get('optimization_params', {})
     opt_params = {**default_opt_params, **dataset_opt_params}
@@ -100,42 +107,68 @@ def main(args):
          opt_params['max_evals'] = opt_params['max_evals_random']
     # else use default max_evals if specific ones aren't set
 
+    # Get search space configuration
+    search_space_config = opt_params.get('search_space', config.DEFAULT_SEARCH_SPACE)
+
     # --- Define Search Space --- #
-    # This should ideally be part of the config, but defining here for now
-    # Make sure to use hp.choice etc. if method is bayesian
     search_space = {}
     if tuning_method == 'bayesian':
         if not optim.HYPEROPT_AVAILABLE:
             logger.error("Hyperopt library is required for Bayesian search but not installed.")
             sys.exit(1)
-        # Example Bayesian space (adjust ranges/choices as needed)
-        search_space = {
-            'n_neighbors': optim.hp.choice('n_neighbors', range(5, 51, 5)),
-            'n_components': optim.hp.choice('n_components', range(3, 16, 2)),
-            'min_cluster_size': optim.hp.choice('min_cluster_size', range(5, 31, 5))
-            # Add other params like metrics if desired
-            # 'umap_metric': optim.hp.choice('umap_metric', ['cosine', 'euclidean'])
-        }
+        from hyperopt import hp
+        # Convert configuration to hyperopt space
+        for param_name, param_config in search_space_config.items():
+            p_type = param_config.get('type', 'choice')
+            p_range = param_config.get('range', [])
+
+            if p_type == 'choice' and len(p_range) == 3:
+                start, end, step = p_range
+                options = list(range(start, end, step))
+                search_space[param_name] = hp.choice(param_name, options)
+            elif p_type == 'choice' and isinstance(p_range, list):
+                search_space[param_name] = hp.choice(param_name, p_range)
+            elif p_type == 'uniform' and len(p_range) == 2:
+                low, high = p_range
+                search_space[param_name] = hp.uniform(param_name, low, high)
+            else:
+                logger.warning(f"Unsupported or invalid search space config for '{param_name}'. Skipping.")
+
     elif tuning_method == 'random':
-        # Example Random space (simple lists/ranges)
-        search_space = {
-            'n_neighbors': list(range(5, 51, 5)),
-            'n_components': list(range(3, 16, 2)),
-            'min_cluster_size': list(range(5, 31, 5))
-            # 'umap_metric': ['cosine', 'euclidean']
-        }
+        # Convert configuration to lists for random.choice
+        for param_name, param_config in search_space_config.items():
+            p_type = param_config.get('type', 'choice')
+            p_range = param_config.get('range', [])
+
+            if (p_type == 'choice' or p_type == 'uniform') and len(p_range) == 3:
+                start, end, step = p_range
+                search_space[param_name] = list(range(start, end, step))
+            elif (p_type == 'choice' or p_type == 'uniform') and len(p_range) == 2:
+                start, end = p_range
+                step = 1 if all(isinstance(x, int) for x in p_range) else (p_range[1] - p_range[0]) / 10
+                if isinstance(step, int) and step > 0:
+                    search_space[param_name] = list(range(start, end, step))
+                else:
+                    search_space[param_name] = list(np.linspace(start, end, num=10))
+            elif p_type == 'choice' and isinstance(p_range, list):
+                search_space[param_name] = p_range
+            else:
+                logger.warning(f"Unsupported or invalid search space config for random search: '{param_name}'. Skipping.")
+
     else:
         logger.error(f"Invalid tuning_method: '{tuning_method}'. Choose 'bayesian' or 'random'.")
         sys.exit(1)
-    logger.info(f"Using search space: {search_space}")
+
+    logger.info(f"Using search space configuration: {search_space_config}")
+    logger.info(f"Constructed search space for '{tuning_method}': {search_space}")
 
     # --- Define Score Configuration --- #
-    # Get bounds from optimization_params in config
     score_config = {
-        'prob_threshold': opt_params.get('score_prob_threshold', 0.05),
-        'label_lower_bound': opt_params.get('score_label_lower_bound'),
-        'label_upper_bound': opt_params.get('score_label_upper_bound')
+        'prob_threshold': opt_params.get('prob_threshold', 0.05),
+        'label_lower_bound': opt_params.get('label_lower_bound', 10),
+        'label_upper_bound': opt_params.get('label_upper_bound', 75)
     }
+    opt_random_state = opt_params.get('random_state', int(time.time()))
 
     # 5. Run Optimization
     results = optim.run_hyperparameter_search(
@@ -146,7 +179,7 @@ def main(args):
         tuning_method=tuning_method
     )
 
-    # 6. Save Results
+    # 6. Save Optimization Results
     hyperopt_path = active_config.get("hyperopt_path")
     if not hyperopt_path:
         logger.error("Config key 'hyperopt_path' is missing. Cannot save optimization results.")
@@ -165,7 +198,84 @@ def main(args):
     else:
         logger.warning("Optimization did not produce results to save.")
 
-    logger.info(f"--- Hyperparameter Optimization for '{dataset_name}' Finished ---")
+    # 7. Generate and Save Final Cluster Assignments
+    cluster_results_path = active_config.get("cluster_results_path")
+    if not cluster_results_path:
+        logger.error("Config key 'cluster_results_path' is missing. Cannot save final cluster assignments.")
+    elif results is not None:
+        logger.info("Extracting best parameters to generate final cluster assignments...")
+        best_params = get_best_params_from_results(results, tuning_method, search_space)
+
+        if best_params:
+            logger.info(f"Running final clustering with best parameters: {best_params}")
+
+            # Separate UMAP and HDBSCAN parameters
+            default_umap_params = config.DEFAULT_UMAP_PARAMS.copy()
+            default_hdbscan_params = config.DEFAULT_HDBSCAN_PARAMS.copy()
+
+            umap_p = {
+                'n_neighbors': best_params['n_neighbors'],
+                'n_components': best_params['n_components'],
+                'metric': best_params.get('umap_metric', default_umap_params.get('metric', 'cosine')),
+                'min_dist': best_params.get('umap_min_dist', default_umap_params.get('min_dist', 0.1))
+            }
+            hdbscan_p = {
+                'min_cluster_size': best_params['min_cluster_size'],
+                'metric': best_params.get('hdbscan_metric', default_hdbscan_params.get('metric', 'euclidean')),
+                'cluster_selection_method': best_params.get('hdbscan_selection', default_hdbscan_params.get('cluster_selection_method', 'eom')),
+                'min_samples': best_params.get('min_samples', default_hdbscan_params.get('min_samples')),
+                'cluster_selection_epsilon': best_params.get('cluster_selection_epsilon', default_hdbscan_params.get('cluster_selection_epsilon', 0.0))
+            }
+            hdbscan_p = {k: v for k, v in hdbscan_p.items() if v is not None}
+
+            umap_random_state = opt_random_state
+            logger.info(f"Using UMAP random state: {umap_random_state}")
+
+            # Re-run UMAP
+            embeddings_reduced_final = dr.reduce_dimensions_umap(
+                embeddings,
+                umap_p,
+                random_state=umap_random_state
+            )
+
+            if embeddings_reduced_final is not None:
+                # Re-run HDBSCAN
+                final_cluster_labels = cl.cluster_hdbscan(
+                    embeddings_reduced_final,
+                    hdbscan_p,
+                    verbose=True
+                )
+
+                if final_cluster_labels is not None:
+                    if len(final_cluster_labels) == len(data_ids):
+                        # Create DataFrame for saving
+                        assignments_df = pd.DataFrame({
+                            'data_id': data_ids,
+                            'cluster_label': final_cluster_labels
+                        })
+
+                        # Save the assignments
+                        saved_assignments_path = helpers.save_cluster_assignments(
+                            assignments_df=assignments_df,
+                            output_dir=cluster_results_path,
+                            filename_prefix=f"{active_config['name']}_assignments"
+                        )
+                        if saved_assignments_path:
+                            logger.info(f"Final cluster assignments saved to: {saved_assignments_path}")
+                        else:
+                            logger.error("Failed to save final cluster assignments.")
+                    else:
+                        logger.error(f"Mismatch between number of labels ({len(final_cluster_labels)}) and data IDs ({len(data_ids)}). Cannot save assignments.")
+                else:
+                    logger.error("Final HDBSCAN clustering failed.")
+            else:
+                logger.error("Final UMAP reduction failed.")
+        else:
+            logger.error("Could not determine best parameters. Skipping final cluster assignment generation.")
+    else:
+        logger.warning("Optimization did not produce results. Skipping final cluster assignment generation.")
+
+    logger.info(f"--- Hyperparameter Optimization Workflow for '{dataset_name}' Finished ---")
 
 
 if __name__ == "__main__":

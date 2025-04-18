@@ -19,3 +19,7 @@ projects_report_template.md
 *.yml
 *.cpython-312.pyc
 *.pyc
+D4-Helpdesk/data/
+D4-Helpdesk/plots/
+
+D4-Helpdesk/src/testing_labeling.py

@@ -109,17 +109,32 @@ def plot_embeddings_interactive(
         'symbol': symbol_by_key if symbol_by_key in plot_df.columns else None,
     }
 
-    # Prepare hover data - use provided keys or default to essential ones + available metadata
+    # Prepare hover data with truncated text
     if hover_data_keys:
         valid_hover_keys = [k for k in hover_data_keys if k in plot_df.columns]
         if len(valid_hover_keys) != len(hover_data_keys):
             logger.warning(f"Some requested hover data keys not found in metadata: {set(hover_data_keys) - set(valid_hover_keys)}")
+        
+        # Create truncated columns for hover data
+        for key in valid_hover_keys:
+            if pd.api.types.is_string_dtype(plot_df[key]):
+                hover_key = f"{key}_hover"
+                plot_df[hover_key] = plot_df[key].astype(str).apply(lambda x: f"{x[:97]}..." if len(x) > 100 else x)
+                valid_hover_keys[valid_hover_keys.index(key)] = hover_key
+        
         plot_args['hover_data'] = valid_hover_keys
     else:
-        # Default hover data (can customize)
+        # Default hover data with truncation
         default_hover = [col for col in plot_df.columns if col not in axis_labels[:dimensions]]
+        # Create truncated columns for hover data
+        for key in default_hover:
+            if pd.api.types.is_string_dtype(plot_df[key]):
+                hover_key = f"{key}_hover"
+                plot_df[hover_key] = plot_df[key].astype(str).apply(lambda x: f"{x[:97]}..." if len(x) > 100 else x)
+                default_hover[default_hover.index(key)] = hover_key
+        
         plot_args['hover_data'] = default_hover
-        logger.info(f"Using default hover data: {default_hover}")
+        logger.info(f"Using default hover data (truncated): {default_hover}")
 
     # Handle potential categorical coloring issues (convert to string)
     if plot_args['color'] and not pd.api.types.is_numeric_dtype(plot_df[plot_args['color']]):
